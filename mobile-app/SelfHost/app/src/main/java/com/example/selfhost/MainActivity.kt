@@ -16,18 +16,25 @@ import androidx.compose.ui.unit.dp
 import android.content.ClipboardManager
 import android.content.ClipData
 import java.io.File
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
+import android.os.Build
+
 
 
 class MainActivity : ComponentActivity() {
 
     private var server: LocalServer? = null
+    private var gatewaySocket: GatewaySocket? = null
 
     private var selectedHtmlUri by mutableStateOf<Uri?>(null)
     private var publicUrl by mutableStateOf<String?>(null)
     private var isRunning by mutableStateOf(false)
+    private var slug by mutableStateOf("")
+
 
     private val pickHtmlFile =
-        registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
             if (uri != null) {
                 contentResolver.takePersistableUriPermission(
                     uri,
@@ -37,79 +44,51 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-    private fun prepareCloudflared(): File {
-        val bin = File(filesDir, "cloudflared")
-
-        if (!bin.exists()) {
-            assets.open("cloudflared").use { input ->
-                bin.outputStream().use { output ->
-                    input.copyTo(output)
-                }
-            }
-            bin.setExecutable(true)
-        }
-
-        return bin
-    }
-
-    private fun getLocalIp(): String? {
-        val interfaces = java.net.NetworkInterface.getNetworkInterfaces()
-        for (intf in interfaces) {
-            if (!intf.name.equals("wlan0", ignoreCase = true)) continue
-            for (addr in intf.inetAddresses) {
-                if (!addr.isLoopbackAddress && addr is java.net.Inet4Address) {
-                    return addr.hostAddress
-                }
+    private val notificationPermissionLauncher =
+        registerForActivityResult(
+            ActivityResultContracts.RequestPermission()
+        ) { granted ->
+            if (granted) {
+                startTunnelService()
+            } else {
+                Toast.makeText(this, "Notification permission required", Toast.LENGTH_LONG).show()
             }
         }
-        return null
+
+    private fun startTunnelService() {
+        val intent = Intent(this, TunnelService::class.java)
+        intent.putExtra("slug", slug)
+
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
     }
 
-    private var cloudflaredProcess: Process? = null
 
-    private fun startCloudflaredTunnel() {
-        val bin = prepareCloudflared()
-        val host = getLocalIp()
+    private fun copyFolderFromUri(uri: Uri, destDir: File) {
+        val docFile = androidx.documentfile.provider.DocumentFile.fromTreeUri(this, uri) ?: return
 
-        if (host == null) {
-            Toast.makeText(this, "No WLAN IP found", Toast.LENGTH_LONG).show()
-            return
-        }
-
-        val process = ProcessBuilder(
-            "/system/bin/linker64",
-            bin.absolutePath,
-            "tunnel",
-            "--url",
-            "http://$host:6969"
-        )
-            .redirectErrorStream(true)
-            .start()
-
-
-        cloudflaredProcess = process
-
-        Thread {
-            process.inputStream.bufferedReader().useLines { lines ->
-                lines.forEach { line ->
-                    android.util.Log.d("cloudflared", line)
-
-                    val match =
-                        Regex("https://.*trycloudflare.com").find(line)
-
-                    if (match != null) {
-                        runOnUiThread {
-                            publicUrl = match.value
-                        }
+        for (file in docFile.listFiles()) {
+            if (file.isDirectory) {
+                val newDir = File(destDir, file.name!!)
+                newDir.mkdirs()
+                copyFolderFromUri(file.uri, newDir)
+            } else if (file.isFile) {
+                val destFile = File(destDir, file.name!!)
+                contentResolver.openInputStream(file.uri)?.use { input ->
+                    destFile.outputStream().use { output ->
+                        input.copyTo(output)
                     }
                 }
             }
-        }.start()
+        }
     }
-
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
 
         setContent {
             MaterialTheme {
@@ -132,15 +111,25 @@ class MainActivity : ComponentActivity() {
 
             Text("SelfHost", style = MaterialTheme.typography.headlineMedium)
 
+            OutlinedTextField(
+                value = slug,
+                onValueChange = {
+                    slug = it.lowercase().replace(" ", "")
+                },
+                label = { Text("Enter site slug") },
+                singleLine = true
+            )
+
+
             Button(onClick = {
-                pickHtmlFile.launch(arrayOf("text/html"))
+                pickHtmlFile.launch(null)
             }) {
                 Text(if (selectedHtmlUri == null) "Select HTML File" else "HTML Selected")
             }
 
             Button(
                 onClick = { startHosting() },
-                enabled = selectedHtmlUri != null && !isRunning
+                enabled = selectedHtmlUri != null && !isRunning && slug.isNotBlank()
             ) {
                 Text("START")
             }
@@ -191,53 +180,48 @@ class MainActivity : ComponentActivity() {
 
 
     private fun startHosting() {
+
         if (selectedHtmlUri == null) {
-            Toast.makeText(this, "No HTML file selected", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "No folder selected", Toast.LENGTH_SHORT).show()
             return
         }
 
-
-
         try {
             server?.stop()
-            server = null
 
-            val htmlText = contentResolver
-                .openInputStream(selectedHtmlUri!!)
-                ?.bufferedReader()
-                ?.use { it.readText() }
-                ?: ""
+            val rootDir = File(filesDir, "site")
 
+            if (rootDir.exists()) rootDir.deleteRecursively()
+            rootDir.mkdirs()
 
-            server = LocalServer(6969, htmlText) { url ->
-                runOnUiThread {
-                    publicUrl = url
+            copyFolderFromUri(selectedHtmlUri!!, rootDir)
+
+            server = LocalServer(6969, rootDir)
+            server?.start()
+
+            isRunning = true
+
+            if (Build.VERSION.SDK_INT >= 33) {
+                notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+            } else {
+                lifecycleScope.launchWhenResumed {
+                    startTunnelService()
                 }
             }
 
-            server?.start()
-            isRunning = true
-            startCloudflaredTunnel()
-
-
-
         } catch (e: Exception) {
             e.printStackTrace()
-            Toast.makeText(
-                this,
-                "Failed: ${e.javaClass.simpleName}",
-                Toast.LENGTH_LONG
-            ).show()
         }
     }
+
 
 
     private fun stopHosting() {
         server?.stop()
         server = null
 
-        cloudflaredProcess?.destroy()
-        cloudflaredProcess = null
+        stopService(Intent(this, TunnelService::class.java))
+
 
         publicUrl = null
         isRunning = false
