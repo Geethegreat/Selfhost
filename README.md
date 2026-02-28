@@ -130,9 +130,3 @@ It makes hosting instant.
 
 This project is actively evolving. Contributions, feedback, and ideas are welcome.
 
----
-
-
-
-Distributed systems enthusiast.  
-Building infrastructure from the ground up.
