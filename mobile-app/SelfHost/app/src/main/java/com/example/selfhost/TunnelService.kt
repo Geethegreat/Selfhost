@@ -44,13 +44,47 @@ class TunnelService : Service() {
     }
 
     private fun connectSocket() {
+
         gatewaySocket = GatewaySocket(
             gatewayUrl = "wss://untractably-hypothecary-vivienne.ngrok-free.dev",
-            slug = slug!!
+            slug = slug!!,
+            listener = object : GatewayListener {
+
+                override fun onConnected() {
+                    Handler(Looper.getMainLooper()).post {
+                        android.widget.Toast.makeText(
+                            applicationContext,
+                            "Connected to gateway",
+                            android.widget.Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                }
+
+                override fun onError(message: String) {
+                    Handler(Looper.getMainLooper()).post {
+                        android.widget.Toast.makeText(
+                            applicationContext,
+                            message,
+                            android.widget.Toast.LENGTH_LONG
+                        ).show()
+                    }
+                }
+
+                override fun onDisconnected() {
+                    Handler(Looper.getMainLooper()).post {
+                        android.widget.Toast.makeText(
+                            applicationContext,
+                            "Gateway disconnected",
+                            android.widget.Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                }
+            }
         )
 
         gatewaySocket?.connect()
     }
+
 
     override fun onDestroy() {
         gatewaySocket?.close()

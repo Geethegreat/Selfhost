@@ -1,69 +1,111 @@
 package com.example.selfhost
 
 import okhttp3.*
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.io.IOException
+import java.util.concurrent.TimeUnit
+
+interface GatewayListener {
+    fun onConnected()
+    fun onError(message: String)
+    fun onDisconnected()
+}
 
 class GatewaySocket(
     private val gatewayUrl: String,
-    private val slug: String
+    private val slug: String,
+    private val localPort: Int = 6969,  // configurable for future full stack support
+    private val listener: GatewayListener
 ) {
+    private val handler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var reconnectRunnable: Runnable? = null
 
-    private val wsClient = OkHttpClient()
-    private val httpClient = OkHttpClient()
+    private val client = OkHttpClient.Builder()
+        .pingInterval(45, TimeUnit.SECONDS)
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(0, TimeUnit.SECONDS)
+        .build()
+
     private var socket: WebSocket? = null
     private var isConnected = false
+    private var reconnectAttempts = 0
+    private var shouldReconnect = true
 
     fun connect() {
+        if (isConnected) return
 
         val request = Request.Builder()
             .url(gatewayUrl)
+            .addHeader("ngrok-skip-browser-warning", "true")
+            .addHeader("User-Agent", "SelfHostAndroidAgent/1.0")
             .build()
 
-        socket = wsClient.newWebSocket(request, object : WebSocketListener() {
+        shouldReconnect = true
+
+        socket = client.newWebSocket(request, object : WebSocketListener() {
 
             override fun onOpen(ws: WebSocket, response: Response) {
                 isConnected = true
+                reconnectAttempts = 0
                 android.util.Log.d("GatewaySocket", "Connected")
-                val registerJson = JSONObject().apply {
+
+                ws.send(JSONObject().apply {
                     put("type", "REGISTER")
                     put("slug", slug)
-                }
+                }.toString())
 
-                ws.send(registerJson.toString())
+                listener.onConnected()
             }
 
             override fun onMessage(ws: WebSocket, text: String) {
-
                 val json = JSONObject(text)
 
-                // 🔥 Handle ERROR from gateway
-                if (json.optString("type") == "ERROR") {
-                    android.util.Log.e("GatewaySocket", "Gateway error: ${json.optString("message")}")
-                    close()
-                    return
+                when (json.optString("type")) {
+                    "PING" -> {
+                        ws.send(JSONObject().put("type", "PONG").toString())
+                        return
+                    }
+                    "ERROR" -> {
+                        val msg = json.optString("message")
+                        android.util.Log.e("GatewaySocket", "Gateway error: $msg")
+                        listener.onError(msg)
+                        if (msg.contains("slug", ignoreCase = true)) {
+                            shouldReconnect = false
+                        }
+                        return
+                    }
                 }
 
                 if (json.optString("method") == "HTTP_REQUEST") {
-
                     val id = json.getString("id")
                     val path = json.getString("path")
                     val httpMethod = json.getString("httpMethod")
                     val headers = json.optJSONObject("headers")
                     val body = json.optString("body", "")
-
                     forwardToLocalServer(id, path, httpMethod, headers, body)
                 }
             }
 
-
             override fun onFailure(ws: WebSocket, t: Throwable, r: Response?) {
                 isConnected = false
-                android.util.Log.e("GatewaySocket", "WS error", t)
+                socket = null
+                android.util.Log.e("GatewaySocket", "WS failure: ${t::class.java.simpleName} — ${t.message}", t)
+                listener.onError("Connection failed: ${t::class.java.simpleName}: ${t.message}")
+                attemptReconnect()
+            }
+
+            override fun onClosing(ws: WebSocket, code: Int, reason: String) {
+                ws.close(1000, null)
             }
 
             override fun onClosed(ws: WebSocket, code: Int, reason: String) {
                 isConnected = false
+                socket = null
+                android.util.Log.d("GatewaySocket", "WS closed: $code $reason")
+                listener.onDisconnected()
+                attemptReconnect()
             }
         })
     }
@@ -75,82 +117,123 @@ class GatewaySocket(
         headersJson: JSONObject?,
         bodyString: String?
     ) {
-
-        val url = "http://localhost:6969$path"
-
+        val url = "http://localhost:$localPort$path"
         val requestBuilder = Request.Builder().url(url)
 
-        // Forward headers
         headersJson?.keys()?.forEach { key ->
             val lower = key.lowercase()
-            val value = headersJson.getString(key)
-
             if (lower != "host" && lower != "accept-encoding") {
-                requestBuilder.addHeader(key, value)
+                requestBuilder.addHeader(key, headersJson.getString(key))
             }
         }
 
-        val requestBody = when {
-            method == "POST" || method == "PUT" || method == "PATCH" ->
-                RequestBody.create(null, bodyString ?: "")
-            else -> null
+        val mediaType = headersJson?.optString("content-type")?.toMediaTypeOrNull()
+
+        // Decode base64 back to bytes if the request body was binary (e.g. file upload)
+        val bodyBytes: ByteArray = when {
+            bodyString.isNullOrEmpty() -> ByteArray(0)
+            isBinaryContentType(headersJson?.optString("content-type") ?: "") ->
+                android.util.Base64.decode(bodyString, android.util.Base64.NO_WRAP)
+            else -> bodyString.toByteArray(Charsets.UTF_8)
         }
 
-        when (method) {
-            "GET" -> requestBuilder.get()
-            "POST" -> requestBuilder.post(requestBody ?: RequestBody.create(null, ByteArray(0)))
-            "PUT" -> requestBuilder.put(requestBody ?: RequestBody.create(null, ByteArray(0)))
+        val requestBody = bodyBytes.toRequestBody(mediaType)
+
+        when (method.uppercase()) {
+            "GET"    -> requestBuilder.get()
+            "POST"   -> requestBuilder.post(requestBody)
+            "PUT"    -> requestBuilder.put(requestBody)
+            "PATCH"  -> requestBuilder.patch(requestBody)
             "DELETE" -> requestBuilder.delete()
-            else -> requestBuilder.get()
+            else     -> requestBuilder.get()
         }
 
-        httpClient.newCall(requestBuilder.build()).enqueue(object : Callback {
+        client.newCall(requestBuilder.build()).enqueue(object : Callback {
 
             override fun onFailure(call: Call, e: IOException) {
                 sendError(id, "Local server error: ${e.message}")
             }
 
             override fun onResponse(call: Call, response: Response) {
-
-                val body = response.body?.string() ?: ""
+                val bodyBytes = response.body?.bytes() ?: ByteArray(0)
+                val contentType = response.headers["content-type"] ?: ""
+                val isBinary = isBinaryContentType(contentType)
 
                 val headersOut = JSONObject()
                 for ((name, value) in response.headers) {
                     val lower = name.lowercase()
-
-                    if (lower !in listOf(
-                            "content-length",
-                            "transfer-encoding",
-                            "connection",
-                            "content-encoding"
-                        )
-                    ) {
+                    if (lower !in listOf("content-length", "transfer-encoding",
+                            "connection", "content-encoding")) {
                         headersOut.put(name, value)
                     }
                 }
 
-
-                val json = JSONObject()
-                    .put("id", id)
-                    .put("status", response.code)
-                    .put("headers", headersOut)
-                    .put("body", body)
-
-                socket?.send(json.toString())
+                socket?.send(
+                    JSONObject()
+                        .put("id", id)
+                        .put("status", response.code)
+                        .put("headers", headersOut)
+                        .put("binary", isBinary)
+                        .put("body", if (isBinary)
+                            android.util.Base64.encodeToString(bodyBytes, android.util.Base64.NO_WRAP)
+                        else
+                            String(bodyBytes, Charsets.UTF_8)
+                        )
+                        .toString()
+                )
             }
         })
     }
 
-    private fun sendError(id: String, message: String) {
-        val json = JSONObject()
-            .put("id", id)
-            .put("body", message)
+    // Shared helper used for both request and response content-type checking
+    private fun isBinaryContentType(contentType: String): Boolean {
+        if (contentType.isEmpty()) return false
+        val textTypes = listOf(
+            "text/",
+            "application/json",
+            "application/xml",
+            "application/javascript",
+            "application/ld+json",
+            "application/x-www-form-urlencoded",
+            "image/svg"
+        )
+        return textTypes.none { contentType.contains(it, ignoreCase = true) }
+    }
 
-        socket?.send(json.toString())
+    private fun sendError(id: String, message: String) {
+        socket?.send(
+            JSONObject()
+                .put("id", id)
+                .put("status", 500)
+                .put("headers", JSONObject())
+                .put("binary", false)
+                .put("body", message)
+                .toString()
+        )
+    }
+
+    private fun attemptReconnect() {
+        if (!shouldReconnect) return
+
+        reconnectRunnable?.let { handler.removeCallbacks(it) }
+
+        val delay = minOf(30_000L, 2_000L * (1L shl reconnectAttempts).coerceAtMost(15))
+        reconnectAttempts++
+
+        android.util.Log.d("GatewaySocket", "Reconnecting in ${delay}ms (attempt $reconnectAttempts)")
+
+        reconnectRunnable = Runnable {
+            if (shouldReconnect) connect()
+        }
+        handler.postDelayed(reconnectRunnable!!, delay)
     }
 
     fun close() {
+        shouldReconnect = false
+        reconnectRunnable?.let { handler.removeCallbacks(it) }
+        reconnectRunnable = null
         socket?.close(1000, "bye")
         socket = null
+        isConnected = false
     }
 }
