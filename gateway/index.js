@@ -5,16 +5,32 @@ const { randomUUID } = require('crypto');
 
 const app = express();
 const server = http.createServer(app);
-const wss = new WebSocketServer({ server, maxPayload: 50 * 1024 * 1024 }); // 50 MB max payload
+const wss = new WebSocketServer({ server, maxPayload: 50 * 1024 * 1024 });
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.raw({ type: '*/*' }));
 
 const connectedPhones = new Map();
-const pending = new Map(); // id -> { res, timeoutHandle, slug }
+const viewerSessions = new Map();
+const analyticsStore = new Map();
+const pending = new Map();
 
 const REQUEST_TIMEOUT_MS = 30000;
+
+function pushStats(ws, slug) {
+    if (ws.readyState !== ws.OPEN) return;
+    const sessions = viewerSessions.get(slug);
+    const liveCount = sessions ? sessions.size : 0;
+    const stats = analyticsStore.get(slug) || { total: 0, monthly: 0, daily: 0 };
+    ws.send(JSON.stringify({
+        type: "STATS",
+        liveViewers: liveCount,
+        dailyVisits: stats.daily,
+        monthlyVisits: stats.monthly,
+        totalVisits: stats.total
+    }));
+}
 
 wss.on('connection', (ws) => {
     console.log('New WebSocket connection established');
@@ -36,20 +52,18 @@ wss.on('connection', (ws) => {
 
         if (data.type === "REGISTER") {
             const slug = data.slug.toLowerCase();
-
             if (connectedPhones.has(slug)) {
                 ws.send(JSON.stringify({ type: "ERROR", message: "Slug already taken" }));
                 ws.close(1008, "Slug already taken");
                 return;
             }
-
             connectedPhones.set(slug, ws);
             ws.slug = slug;
             console.log("Phone registered:", slug);
+            pushStats(ws, slug);
             return;
         }
 
-        // Handle HTTP response from phone
         const entry = pending.get(data.id);
         if (!entry) return;
 
@@ -57,7 +71,6 @@ wss.on('connection', (ws) => {
         pending.delete(data.id);
 
         const { res } = entry;
-
         res.status(data.status || 200);
 
         if (data.headers) {
@@ -72,7 +85,6 @@ wss.on('connection', (ws) => {
         const body = data.binary
             ? Buffer.from(data.body, 'base64')
             : data.body;
-
         res.send(body);
     });
 
@@ -80,8 +92,6 @@ wss.on('connection', (ws) => {
         if (ws.slug) {
             connectedPhones.delete(ws.slug);
             console.log("Phone disconnected:", ws.slug);
-
-            // Fail any in-flight requests for this phone
             pending.forEach((entry, id) => {
                 if (entry.slug === ws.slug) {
                     clearTimeout(entry.timeoutHandle);
@@ -98,7 +108,12 @@ wss.on('connection', (ws) => {
     });
 });
 
-// Single heartbeat interval outside connection handler
+// Single stats push interval
+const statsInterval = setInterval(() => {
+    connectedPhones.forEach((ws, slug) => pushStats(ws, slug));
+}, 5000);
+
+// Single heartbeat interval
 const heartbeatInterval = setInterval(() => {
     connectedPhones.forEach((ws, slug) => {
         if (!ws.isAlive) {
@@ -112,7 +127,31 @@ const heartbeatInterval = setInterval(() => {
     });
 }, 15000);
 
-server.on('close', () => clearInterval(heartbeatInterval));
+// Clean up stale viewer sessions
+setInterval(() => {
+    const cutoff = Date.now() - 5 * 60 * 1000;
+    viewerSessions.forEach((sessions) => {
+        sessions.forEach((lastSeen, ip) => {
+            if (lastSeen < cutoff) sessions.delete(ip);
+        });
+    });
+}, 60_000);
+
+// Reset daily/monthly counters
+setInterval(() => {
+    const now = new Date();
+    analyticsStore.forEach((stats) => {
+        const last = new Date(stats.lastReset);
+        if (last.getDate() !== now.getDate()) stats.daily = 0;
+        if (last.getMonth() !== now.getMonth()) stats.monthly = 0;
+        stats.lastReset = Date.now();
+    });
+}, 60_000);
+
+server.on('close', () => {
+    clearInterval(heartbeatInterval);
+    clearInterval(statsInterval);
+});
 
 app.use((req, res) => {
     if (req.url === '/favicon.ico') return res.status(204).end();
@@ -125,17 +164,36 @@ app.use((req, res) => {
 
     if (parts.length === 0) return res.status(404).send("No slug provided");
 
+    // Declare slug first
     const slug = parts[0].toLowerCase();
     const phone = connectedPhones.get(slug);
 
     if (!phone) return res.status(404).send("Site not found or phone offline");
+
+    // Analytics — after slug is declared
+    const ip = req.headers['x-forwarded-for']?.split(',')[0] || req.ip;
+    const now = Date.now();
+
+    if (!viewerSessions.has(slug)) viewerSessions.set(slug, new Map());
+    const sessions = viewerSessions.get(slug);
+    const isNewVisitor = !sessions.has(ip) || (now - sessions.get(ip)) > 5 * 60 * 1000;
+    sessions.set(ip, now);
+
+    if (isNewVisitor) {
+        if (!analyticsStore.has(slug)) {
+            analyticsStore.set(slug, { total: 0, monthly: 0, daily: 0, lastReset: now });
+        }
+        const stats = analyticsStore.get(slug);
+        stats.total++;
+        stats.monthly++;
+        stats.daily++;
+    }
 
     const strippedPath = '/' + parts.slice(1).join('/');
     const finalPath = strippedPath === '/' ? '/' : strippedPath;
 
     const id = randomUUID();
 
-    // Per-request timeout
     const timeoutHandle = setTimeout(() => {
         if (pending.has(id)) {
             pending.delete(id);
@@ -145,7 +203,6 @@ app.use((req, res) => {
 
     pending.set(id, { res, timeoutHandle, slug });
 
-    // Normalize request body
     let bodyToSend = null;
     if (req.body) {
         if (Buffer.isBuffer(req.body)) {

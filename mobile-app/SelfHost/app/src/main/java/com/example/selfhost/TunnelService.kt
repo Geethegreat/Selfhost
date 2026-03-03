@@ -13,11 +13,12 @@ class TunnelService : Service() {
     private var gatewaySocket: GatewaySocket? = null
     private val handler = Handler(Looper.getMainLooper())
     private var slug: String? = null
-
+    private var isRunning = false
+    private var reconnectAttempts = 0
+    private var liveViewers = 0
 
     companion object {
         const val CHANNEL_ID = "tunnel_channel"
-        const val EXTRA_HTML = "extra_html"
     }
 
     override fun onCreate() {
@@ -26,24 +27,27 @@ class TunnelService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        startForeground(1, createNotification("Connecting..."))
 
-
-        startForeground(1, createNotification())
-
-        slug = intent?.getStringExtra("slug")
-
-        if (slug.isNullOrBlank()) {
+        val newSlug = intent?.getStringExtra("slug")
+        if (newSlug.isNullOrBlank()) {
             stopSelf()
             return START_NOT_STICKY
         }
 
+        if (isRunning && newSlug == slug) return START_STICKY
 
+        slug = newSlug
+        isRunning = true
+        reconnectAttempts = 0
         connectSocket()
 
         return START_STICKY
     }
 
     private fun connectSocket() {
+        gatewaySocket?.close()
+        gatewaySocket = null
 
         gatewaySocket = GatewaySocket(
             gatewayUrl = "wss://untractably-hypothecary-vivienne.ngrok-free.dev",
@@ -51,32 +55,41 @@ class TunnelService : Service() {
             listener = object : GatewayListener {
 
                 override fun onConnected() {
-                    Handler(Looper.getMainLooper()).post {
-                        android.widget.Toast.makeText(
-                            applicationContext,
-                            "Connected to gateway",
-                            android.widget.Toast.LENGTH_SHORT
-                        ).show()
-                    }
+                    reconnectAttempts = 0
+                    updateNotification("Live · $liveViewers viewing")
                 }
 
                 override fun onError(message: String) {
-                    Handler(Looper.getMainLooper()).post {
-                        android.widget.Toast.makeText(
-                            applicationContext,
-                            message,
-                            android.widget.Toast.LENGTH_LONG
-                        ).show()
-                    }
+                    updateNotification("Error: $message")
                 }
 
                 override fun onDisconnected() {
-                    Handler(Looper.getMainLooper()).post {
-                        android.widget.Toast.makeText(
-                            applicationContext,
-                            "Gateway disconnected",
-                            android.widget.Toast.LENGTH_SHORT
-                        ).show()
+                    updateNotification("Reconnecting...")
+                }
+
+                override fun onStats(
+                    liveViewers: Int,
+                    dailyVisits: Int,
+                    monthlyVisits: Int,
+                    totalVisits: Int
+                ) {
+                    this@TunnelService.liveViewers = liveViewers
+
+                    // Update notification with live viewer count
+                    updateNotification(
+                        if (liveViewers == 0) "Live · no viewers"
+                        else if (liveViewers == 1) "Live · 1 person viewing"
+                        else "Live · $liveViewers people viewing"
+                    )
+
+                    // Broadcast to MainActivity for the stats UI
+                    handler.post {
+                        sendBroadcast(Intent("com.example.selfhost.STATS_UPDATE").apply {
+                            putExtra("liveViewers", liveViewers)
+                            putExtra("dailyVisits", dailyVisits)
+                            putExtra("monthlyVisits", monthlyVisits)
+                            putExtra("totalVisits", totalVisits)
+                        })
                     }
                 }
             }
@@ -85,8 +98,9 @@ class TunnelService : Service() {
         gatewaySocket?.connect()
     }
 
-
     override fun onDestroy() {
+        isRunning = false
+        handler.removeCallbacksAndMessages(null)
         gatewaySocket?.close()
         gatewaySocket = null
         super.onDestroy()
@@ -94,14 +108,17 @@ class TunnelService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    // --------------------------
-    // Notification Stuff
-    // --------------------------
+    private fun updateNotification(text: String) {
+        handler.post {
+            val manager = getSystemService(NotificationManager::class.java)
+            manager.notify(1, createNotification(text))
+        }
+    }
 
-    private fun createNotification(): Notification {
+    private fun createNotification(text: String = "Tunnel is active"): Notification {
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("SelfHost Running")
-            .setContentText("Tunnel is active")
+            .setContentTitle("SelfHost · $slug")
+            .setContentText(text)
             .setSmallIcon(android.R.drawable.stat_sys_upload)
             .setOngoing(true)
             .build()
@@ -114,8 +131,8 @@ class TunnelService : Service() {
                 "Tunnel Service",
                 NotificationManager.IMPORTANCE_LOW
             )
-            val manager = getSystemService(NotificationManager::class.java)
-            manager.createNotificationChannel(channel)
+            getSystemService(NotificationManager::class.java)
+                .createNotificationChannel(channel)
         }
     }
 }

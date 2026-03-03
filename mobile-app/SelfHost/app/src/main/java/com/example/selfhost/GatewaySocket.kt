@@ -11,12 +11,13 @@ interface GatewayListener {
     fun onConnected()
     fun onError(message: String)
     fun onDisconnected()
+    fun onStats(liveViewers: Int, dailyVisits: Int, monthlyVisits: Int, totalVisits: Int)
 }
 
 class GatewaySocket(
     private val gatewayUrl: String,
     private val slug: String,
-    private val localPort: Int = 6969,  // configurable for future full stack support
+    private val localPort: Int = 6969,
     private val listener: GatewayListener
 ) {
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
@@ -76,6 +77,16 @@ class GatewaySocket(
                         }
                         return
                     }
+                    "STATS" -> {
+                        val liveViewers = json.optInt("liveViewers", 0)
+                        val dailyVisits = json.optInt("dailyVisits", 0)
+                        val monthlyVisits = json.optInt("monthlyVisits", 0)
+                        val totalVisits = json.optInt("totalVisits", 0)
+                        android.util.Log.d("GatewaySocket",
+                            "Stats: live=$liveViewers daily=$dailyVisits monthly=$monthlyVisits total=$totalVisits")
+                        listener.onStats(liveViewers, dailyVisits, monthlyVisits, totalVisits)
+                        return
+                    }
                 }
 
                 if (json.optString("method") == "HTTP_REQUEST") {
@@ -129,7 +140,6 @@ class GatewaySocket(
 
         val mediaType = headersJson?.optString("content-type")?.toMediaTypeOrNull()
 
-        // Decode base64 back to bytes if the request body was binary (e.g. file upload)
         val bodyBytes: ByteArray = when {
             bodyString.isNullOrEmpty() -> ByteArray(0)
             isBinaryContentType(headersJson?.optString("content-type") ?: "") ->
@@ -185,7 +195,6 @@ class GatewaySocket(
         })
     }
 
-    // Shared helper used for both request and response content-type checking
     private fun isBinaryContentType(contentType: String): Boolean {
         if (contentType.isEmpty()) return false
         val textTypes = listOf(
