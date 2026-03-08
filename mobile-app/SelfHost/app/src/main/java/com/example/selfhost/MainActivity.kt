@@ -26,6 +26,8 @@ import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
+import androidx.compose.foundation.combinedClickable
+
 
 class MainActivity : ComponentActivity() {
 
@@ -50,7 +52,6 @@ class MainActivity : ComponentActivity() {
             totalVisits = intent?.getIntExtra("totalVisits", 0) ?: 0
         }
     }
-
     private val pickFolder =
         registerForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
             if (uri != null) {
@@ -102,7 +103,7 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent)
         else startService(intent)
 
-        publicUrl = "https://untractably-hypothecary-vivienne.ngrok-free.dev/$slug/"
+        publicUrl = "https://wheelstracker.com/selfhost/u/$slug/"
     }
 
     private fun copyFolderFromUri(uri: Uri, destDir: File) {
@@ -301,7 +302,7 @@ class MainActivity : ComponentActivity() {
                 )
                 if (slug.isNotBlank()) {
                     Text(
-                        "untractably-hypothecary-vivienne.ngrok-free.dev/$slug/",
+                        "wheelstracker.com/selfhost/u/$slug/",
                         fontSize = 11.sp,
                         color = Color(0xFF00C2FF).copy(alpha = 0.7f),
                         fontWeight = FontWeight.Medium
@@ -385,11 +386,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    @OptIn(ExperimentalFoundationApi::class)
     @Composable
     fun UrlCard(url: String) {
         DarkCard(borderColor = Color(0xFF00C2FF).copy(0.3f)) {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Label("PUBLIC URL")
+                Label("PUBLIC URL · HOLD TO COPY")
                 Text(
                     url,
                     fontSize = 13.sp,
@@ -398,23 +400,16 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier
                         .fillMaxWidth()
                         .background(Color(0xFF0D1A22), RoundedCornerShape(8.dp))
+                        .combinedClickable(
+                            onClick = {},
+                            onLongClick = {
+                                val clipboard = getSystemService(ClipboardManager::class.java)
+                                clipboard.setPrimaryClip(ClipData.newPlainText("SelfHost URL", url))
+                                Toast.makeText(this@MainActivity, "Copied!", Toast.LENGTH_SHORT).show()
+                            }
+                        )
                         .padding(12.dp)
                 )
-                Button(
-                    onClick = {
-                        val clipboard = getSystemService(ClipboardManager::class.java)
-                        clipboard.setPrimaryClip(ClipData.newPlainText("SelfHost URL", url))
-                        Toast.makeText(this@MainActivity, "Copied!", Toast.LENGTH_SHORT).show()
-                    },
-                    modifier = Modifier.fillMaxWidth().height(44.dp),
-                    shape = RoundedCornerShape(8.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = Color(0xFF00C2FF).copy(0.15f),
-                        contentColor = Color(0xFF00C2FF)
-                    )
-                ) {
-                    Text("COPY URL", fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp, fontSize = 12.sp)
-                }
             }
         }
     }

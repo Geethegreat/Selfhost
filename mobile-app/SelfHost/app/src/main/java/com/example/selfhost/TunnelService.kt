@@ -50,7 +50,7 @@ class TunnelService : Service() {
         gatewaySocket = null
 
         gatewaySocket = GatewaySocket(
-            gatewayUrl = "wss://untractably-hypothecary-vivienne.ngrok-free.dev",
+            gatewayUrl = "wss://wheelstracker.com/selfhost/u/",
             slug = slug!!,
             listener = object : GatewayListener {
 
@@ -85,6 +85,7 @@ class TunnelService : Service() {
                     // Broadcast to MainActivity for the stats UI
                     handler.post {
                         sendBroadcast(Intent("com.example.selfhost.STATS_UPDATE").apply {
+                            setPackage(packageName)
                             putExtra("liveViewers", liveViewers)
                             putExtra("dailyVisits", dailyVisits)
                             putExtra("monthlyVisits", monthlyVisits)
