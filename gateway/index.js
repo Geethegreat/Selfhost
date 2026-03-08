@@ -2,7 +2,7 @@ const express = require('express');
 const { WebSocketServer } = require('ws');
 const http = require('http');
 const { randomUUID } = require('crypto');
-
+const rateLimit = require('express-rate-limit');
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, maxPayload: 50 * 1024 * 1024 });
@@ -10,6 +10,13 @@ const wss = new WebSocketServer({ server, maxPayload: 50 * 1024 * 1024 });
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.raw({ type: '*/*' }));
+app.use(rateLimit({
+    windowMs: 60 * 1000,
+    max: 60,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: "Too many requests from this IP, please try again in a minute"
+}));
 
 const connectedPhones = new Map();
 const viewerSessions = new Map();
