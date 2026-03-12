@@ -172,19 +172,22 @@ class SignInActivity : ComponentActivity() {
                 val result = credentialManager.getCredential(this@SignInActivity, request)
                 val credential = result.credential
 
-                if (credential is GoogleIdTokenCredential) {
-                    val idToken = credential.idToken
+                if (credential is CustomCredential &&
+                    credential.type == GoogleIdTokenCredential.TYPE_GOOGLE_ID_TOKEN_CREDENTIAL
+                ) {
+                    val googleCredential = GoogleIdTokenCredential.createFrom(credential.data)
+                    val idToken = googleCredential.idToken
                     val signInResult = FirebaseRepository.signInWithCredential(idToken)
                     if (signInResult.isSuccess) {
                         goToMain()
                     } else {
-                        showError("Sign in failed. Please try again.")
+                        showError("Sign in failed: ${signInResult.exceptionOrNull()?.message}")
                     }
                 } else {
-                    showError("Unexpected credential type.")
+                    showError("Unexpected credential type: ${credential.type}")
                 }
             } catch (e: GetCredentialException) {
-                showError("Google sign in cancelled.")
+                showError("Google sign in cancelled: ${e.message}")
             } catch (e: Exception) {
                 showError("Error: ${e.message}")
             } finally {

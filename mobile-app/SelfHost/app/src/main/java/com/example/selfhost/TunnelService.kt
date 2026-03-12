@@ -50,7 +50,8 @@ class TunnelService : Service() {
         gatewaySocket = null
 
         gatewaySocket = GatewaySocket(
-            gatewayUrl = "wss://wheelstracker.com/selfhost/u/",
+            // gatewayUrl = "wss://wheelstracker.com/selfhost/u/",
+            gatewayUrl = "wss://untractably-hypothecary-vivienne.ngrok-free.dev",
             slug = slug!!,
             listener = object : GatewayListener {
 

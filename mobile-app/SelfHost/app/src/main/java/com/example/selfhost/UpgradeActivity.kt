@@ -31,7 +31,7 @@ class UpgradeActivity : ComponentActivity() {
         // Load current plan
         lifecycleScope.launch {
             val uid = FirebaseRepository.currentFirebaseUser?.uid ?: return@launch
-            val user = FirebaseRepository.fetchUser(uid)
+            val user = FirebaseRepository.getUser(uid)
             currentPlan = user?.plan ?: "free"
         }
 

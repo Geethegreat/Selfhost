@@ -7,8 +7,6 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
-
-
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -20,20 +18,30 @@
         android:theme="@style/Theme.SelfHost"
         android:networkSecurityConfig="@xml/network_security_config"
         tools:targetApi="31">
+
         <activity
-            android:name=".MainActivity"
+            android:name=".SignInActivity"
             android:exported="true"
-            android:label="@string/app_name"
             android:theme="@style/Theme.SelfHost">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="false"
+            android:label="@string/app_name"
+            android:theme="@style/Theme.SelfHost" />
+
+        <activity android:name=".UpgradeActivity" />
+
         <service
             android:name=".TunnelService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
     </application>
 
 </manifest>
