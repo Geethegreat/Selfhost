@@ -6,6 +6,10 @@ const rateLimit = require('express-rate-limit');
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, maxPayload: 50 * 1024 * 1024 });
+const fs = require('fs');  
+const path = require('path');
+
+const ANALYTICS_FILE = path.join(__dirname, 'analytics.json');
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -22,6 +26,7 @@ const connectedPhones = new Map();
 const viewerSessions = new Map();
 const analyticsStore = new Map();
 const pending = new Map();
+
 
 const REQUEST_TIMEOUT_MS = 30000;
 
@@ -57,8 +62,14 @@ wss.on('connection', (ws) => {
             return;
         }
 
+
         if (data.type === "REGISTER") {
             const slug = data.slug.toLowerCase();
+            if (!/^[a-z0-9-]{3,30}$/.test(slug)) {
+                ws.send(JSON.stringify({ type: "ERROR", message: "Invalid slug" }))
+                ws.close()
+                return
+            }
             if (connectedPhones.has(slug)) {
                 ws.send(JSON.stringify({ type: "ERROR", message: "Slug already taken" }));
                 ws.close(1008, "Slug already taken");
@@ -119,6 +130,20 @@ wss.on('connection', (ws) => {
 const statsInterval = setInterval(() => {
     connectedPhones.forEach((ws, slug) => pushStats(ws, slug));
 }, 5000);
+
+try {
+    const saved = JSON.parse(fs.readFileSync(ANALYTICS_FILE, 'utf8'));
+    Object.entries(saved).forEach(([key, value]) => analyticsStore.set(key, value));
+    console.log(`Loaded analytics for ${analyticsStore.size} slugs`);
+} catch (_) {
+    console.log('No analytics file found, starting fresh');
+}
+
+// Save every 5 minutes
+setInterval(() => {
+    fs.writeFileSync(ANALYTICS_FILE, 
+        JSON.stringify(Object.fromEntries(analyticsStore)))
+}, 5 * 60 * 1000)
 
 // Single heartbeat interval
 const heartbeatInterval = setInterval(() => {
