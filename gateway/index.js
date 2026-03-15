@@ -31,11 +31,16 @@ const pending = new Map();
 
 const REQUEST_TIMEOUT_MS = 30000;
 
+function analyticsKey(uid, slug) {
+    return `${uid}:${slug}`;
+}
+
 function pushStats(ws, slug) {
     if (ws.readyState !== ws.OPEN) return;
+    const key = analyticsKey(ws.uid, slug);
     const sessions = viewerSessions.get(slug);
     const liveCount = sessions ? sessions.size : 0;
-    const stats = analyticsStore.get(slug) || { total: 0, monthly: 0, daily: 0 };
+    const stats = analyticsStore.get(key) || { total: 0, monthly: 0, daily: 0 };
     ws.send(JSON.stringify({
         type: "STATS",
         liveViewers: liveCount,
@@ -65,18 +70,19 @@ wss.on('connection', (ws) => {
 
         if (data.type === "REGISTER") {
             const slug = data.slug.toLowerCase();
+            const uid = data.uid || "";
+
             if (!/^[a-z0-9-]{3,30}$/.test(slug)) {
                 ws.send(JSON.stringify({ type: "ERROR", message: "Invalid slug" }));
                 ws.close();
                 return;
             }
-            // If slug already registered, kick the old connection and accept the new one
-            // This handles reconnects after network changes without rejecting the new connection
+
             if (connectedPhones.has(slug)) {
                 const oldWs = connectedPhones.get(slug);
                 if (oldWs !== ws) {
-                    // Only allow takeover if same UID (reconnect), reject if different UID (slug theft)
-                    if (oldWs.uid && oldWs.uid !== data.uid) {
+                    if (oldWs.uid && data.uid && oldWs.uid !== data.uid) {
+                        console.log(`Slug theft attempt: slug=${slug} oldUid=${oldWs.uid} newUid=${data.uid}`);
                         ws.send(JSON.stringify({ type: "ERROR", message: "Slug already taken" }));
                         ws.close(1008, "Slug already taken");
                         return;
@@ -86,10 +92,11 @@ wss.on('connection', (ws) => {
                     connectedPhones.delete(slug);
                 }
             }
+
             connectedPhones.set(slug, ws);
             ws.slug = slug;
-            ws.uid = data.uid; // store uid on the connection
-            console.log("Phone registered:", slug);
+            ws.uid = uid;
+            console.log("Phone registered:", slug, "uid:", uid);
             pushStats(ws, slug);
             return;
         }
@@ -120,8 +127,6 @@ wss.on('connection', (ws) => {
 
     ws.on('close', () => {
         if (ws.slug) {
-            // Only delete if this is still the active connection for this slug
-            // (don't delete if it was already replaced by a new connection)
             if (connectedPhones.get(ws.slug) === ws) {
                 connectedPhones.delete(ws.slug);
                 console.log("Phone disconnected:", ws.slug);
@@ -222,16 +227,19 @@ app.use((req, res) => {
     const ip = req.headers['x-forwarded-for']?.split(',')[0] || req.ip;
     const now = Date.now();
 
+    // Use uid:slug key for analytics
+    const key = analyticsKey(phone.uid || '', slug);
+
     if (!viewerSessions.has(slug)) viewerSessions.set(slug, new Map());
     const sessions = viewerSessions.get(slug);
     const isNewVisitor = !sessions.has(ip) || (now - sessions.get(ip)) > 5 * 60 * 1000;
     sessions.set(ip, now);
 
     if (isNewVisitor) {
-        if (!analyticsStore.has(slug)) {
-            analyticsStore.set(slug, { total: 0, monthly: 0, daily: 0, lastReset: now });
+        if (!analyticsStore.has(key)) {
+            analyticsStore.set(key, { total: 0, monthly: 0, daily: 0, lastReset: now });
         }
-        const stats = analyticsStore.get(slug);
+        const stats = analyticsStore.get(key);
         stats.total++;
         stats.monthly++;
         stats.daily++;
