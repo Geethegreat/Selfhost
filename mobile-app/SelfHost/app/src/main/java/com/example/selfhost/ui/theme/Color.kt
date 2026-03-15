@@ -1,4 +1,4 @@
-package com.example.selfhost.ui.theme
+package com.example.app.ui.theme
 
 import androidx.compose.ui.graphics.Color
 

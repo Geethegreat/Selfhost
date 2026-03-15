@@ -1,9 +1,11 @@
-package com.example.selfhost
+package com.example.app
 
 import android.content.*
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -27,8 +29,6 @@ import kotlinx.coroutines.launch
 import java.io.File
 
 class MainActivity : ComponentActivity() {
-
-    private var server: LocalServer? = null
 
     private var selectedHtmlUri by mutableStateOf<Uri?>(null)
     private var publicUrl by mutableStateOf<String?>(null)
@@ -61,7 +61,6 @@ class MainActivity : ComponentActivity() {
             if (message.contains("slug", ignoreCase = true)) {
                 slugError = "This slug is already taken — try another"
                 isRunning = false
-                server?.stop(); server = null
             }
         }
     }
@@ -94,6 +93,9 @@ class MainActivity : ComponentActivity() {
         slug = prefs.getString("last_slug", "") ?: ""
         hasSeenOnboarding = prefs.getBoolean("has_seen_onboarding", false)
 
+        // Restore UI state if service is already running (e.g. user reopened app)
+        restoreRunningState()
+
         // Load user from Firestore
         lifecycleScope.launch {
             val uid = FirebaseRepository.currentFirebaseUser?.uid ?: return@launch
@@ -119,18 +121,48 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        // Refresh user on resume so plan updates from UpgradeActivity reflect immediately
+        restoreRunningState()
         val uid = FirebaseRepository.currentFirebaseUser?.uid ?: return
-        lifecycleScope.launch {
-            currentUser = FirebaseRepository.getUser(uid)
-        }
+        lifecycleScope.launch { currentUser = FirebaseRepository.getUser(uid) }
     }
 
     override fun onDestroy() {
         super.onDestroy()
         unregisterReceiver(statsReceiver)
         unregisterReceiver(errorReceiver)
-        stopHosting()
+        // Don't call stopHosting here — service should keep running after activity is destroyed
+    }
+
+    @Suppress("DEPRECATION")
+    private fun isTunnelServiceRunning(): Boolean {
+        val manager = getSystemService(android.app.ActivityManager::class.java)
+        return manager.getRunningServices(Int.MAX_VALUE)
+            .any { it.service.className == TunnelService::class.java.name }
+    }
+
+    private fun restoreRunningState() {
+        if (isTunnelServiceRunning() && slug.isNotBlank()) {
+            isRunning = true
+            publicUrl = "https://untractably-hypothecary-vivienne.ngrok-free.dev/$slug"
+            // Mark folder as selected so UI doesn't show "no folder selected"
+            selectedHtmlUri = Uri.fromFile(java.io.File(filesDir, "site"))
+        }
+    }
+
+    private fun requestBatteryOptimizationExemption() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val pm = getSystemService(PowerManager::class.java)
+            if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+                try {
+                    startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                        data = Uri.parse("package:$packageName")
+                    })
+                } catch (_: Exception) {
+                    // Fallback — open general battery settings
+                    startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+                }
+            }
+        }
     }
 
     private fun startTunnelService() {
@@ -176,14 +208,14 @@ class MainActivity : ComponentActivity() {
         hasSeenOnboarding = true
 
         try {
-            server?.stop()
+            // Copy site files to filesDir/site so TunnelService can access them
             val rootDir = File(filesDir, "site").also {
                 if (it.exists()) it.deleteRecursively()
                 it.mkdirs()
             }
             copyFolderFromUri(selectedHtmlUri!!, rootDir)
-            server = LocalServer(6969, rootDir).also { it.start() }
             isRunning = true
+            requestBatteryOptimizationExemption()
             if (Build.VERSION.SDK_INT >= 33)
                 notificationPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
             else lifecycleScope.launch { startTunnelService() }
@@ -195,12 +227,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun stopHosting() {
-        // Deactivate slug in Firestore
         val uid = FirebaseRepository.currentFirebaseUser?.uid
         if (uid != null && slug.isNotBlank()) {
             lifecycleScope.launch { FirebaseRepository.deactivateSlug(uid, slug) }
         }
-        server?.stop(); server = null
         stopService(Intent(this, TunnelService::class.java))
         publicUrl = null; isRunning = false
         liveViewers = 0; dailyVisits = 0; monthlyVisits = 0; totalVisits = 0

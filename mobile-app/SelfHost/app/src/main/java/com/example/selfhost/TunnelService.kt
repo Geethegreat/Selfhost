@@ -1,4 +1,4 @@
-package com.example.selfhost
+package com.example.app
 
 import android.app.*
 import android.content.Intent
@@ -6,19 +6,23 @@ import android.os.Build
 import android.os.IBinder
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import androidx.core.app.NotificationCompat
+import java.io.File
 
 class TunnelService : Service() {
 
     private var gatewaySocket: GatewaySocket? = null
+    private var localServer: LocalServer? = null
     private val handler = Handler(Looper.getMainLooper())
     private var slug: String? = null
     private var isRunning = false
-    private var reconnectAttempts = 0
     private var liveViewers = 0
 
     companion object {
         const val CHANNEL_ID = "tunnel_channel"
+        const val ACTION_STOP = "com.example.selfhost.ACTION_STOP"
+        private const val NOTIF_ID = 1
     }
 
     override fun onCreate() {
@@ -27,11 +31,14 @@ class TunnelService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startForeground(1, createNotification("Connecting..."))
+        if (intent?.action == ACTION_STOP) {
+            stopTunnel()
+            return START_NOT_STICKY
+        }
 
         val newSlug = intent?.getStringExtra("slug")
         if (newSlug.isNullOrBlank()) {
-            stopSelf()
+            stopTunnel()
             return START_NOT_STICKY
         }
 
@@ -39,10 +46,26 @@ class TunnelService : Service() {
 
         slug = newSlug
         isRunning = true
-        reconnectAttempts = 0
+
+        startForeground(NOTIF_ID, createNotification("Connecting..."))
+        startLocalServer()
         connectSocket()
 
         return START_STICKY
+    }
+
+    private fun startLocalServer() {
+        try {
+            localServer?.stop()
+            val rootDir = File(filesDir, "site")
+            if (!rootDir.exists() || !rootDir.isDirectory) {
+                updateNotification("Error: site folder missing")
+                return
+            }
+            localServer = LocalServer(6969, rootDir).also { it.start() }
+        } catch (e: Exception) {
+            updateNotification("Local server error: ${e.message}")
+        }
     }
 
     private fun connectSocket() {
@@ -50,14 +73,12 @@ class TunnelService : Service() {
         gatewaySocket = null
 
         gatewaySocket = GatewaySocket(
-            // gatewayUrl = "wss://wheelstracker.com/selfhost/u/",
             gatewayUrl = "wss://untractably-hypothecary-vivienne.ngrok-free.dev",
             slug = slug!!,
             listener = object : GatewayListener {
 
                 override fun onConnected() {
-                    reconnectAttempts = 0
-                    updateNotification("Live · $liveViewers viewing")
+                    updateNotification("Live · no viewers")
                 }
 
                 override fun onError(message: String) {
@@ -65,7 +86,7 @@ class TunnelService : Service() {
                 }
 
                 override fun onDisconnected() {
-                    updateNotification("Reconnecting...")
+                    if (isRunning) updateNotification("Reconnecting...")
                 }
 
                 override fun onStats(
@@ -76,14 +97,14 @@ class TunnelService : Service() {
                 ) {
                     this@TunnelService.liveViewers = liveViewers
 
-                    // Update notification with live viewer count
                     updateNotification(
-                        if (liveViewers == 0) "Live · no viewers"
-                        else if (liveViewers == 1) "Live · 1 person viewing"
-                        else "Live · $liveViewers people viewing"
+                        when (liveViewers) {
+                            0 -> "Live · no viewers"
+                            1 -> "Live · 1 person viewing"
+                            else -> "Live · $liveViewers people viewing"
+                        }
                     )
 
-                    // Broadcast to MainActivity for the stats UI
                     handler.post {
                         sendBroadcast(Intent("com.example.selfhost.STATS_UPDATE").apply {
                             setPackage(packageName)
@@ -100,29 +121,73 @@ class TunnelService : Service() {
         gatewaySocket?.connect()
     }
 
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        super.onTaskRemoved(rootIntent)
+        if (!isRunning || slug.isNullOrBlank()) return
+
+        val restartIntent = Intent(this, TunnelService::class.java).apply {
+            putExtra("slug", slug)
+        }
+        val pendingIntent = PendingIntent.getService(
+            this, 2, restartIntent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_ONE_SHOT
+        )
+        val alarmManager = getSystemService(ALARM_SERVICE) as AlarmManager
+        alarmManager.set(
+            AlarmManager.ELAPSED_REALTIME,
+            SystemClock.elapsedRealtime() + 1000,
+            pendingIntent
+        )
+    }
+
     override fun onDestroy() {
+        stopTunnel()
+        super.onDestroy()
+    }
+
+    private fun stopTunnel() {
         isRunning = false
         handler.removeCallbacksAndMessages(null)
         gatewaySocket?.close()
         gatewaySocket = null
-        super.onDestroy()
+        localServer?.stop()
+        localServer = null
+
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.cancel(NOTIF_ID)
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun updateNotification(text: String) {
+        if (!isRunning) return
         handler.post {
             val manager = getSystemService(NotificationManager::class.java)
-            manager.notify(1, createNotification(text))
+            manager.notify(NOTIF_ID, createNotification(text))
         }
     }
 
-    private fun createNotification(text: String = "Tunnel is active"): Notification {
+    private fun createNotification(text: String): Notification {
+        val openIntent = PendingIntent.getActivity(
+            this, 0,
+            Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        val stopIntent = PendingIntent.getService(
+            this, 1,
+            Intent(this, TunnelService::class.java).apply { action = ACTION_STOP },
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("SelfHost · $slug")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.stat_sys_upload)
+            .setContentIntent(openIntent)
+            .addAction(android.R.drawable.ic_delete, "Stop", stopIntent)
             .setOngoing(true)
+            .setSilent(true)
             .build()
     }
 
@@ -133,6 +198,7 @@ class TunnelService : Service() {
                 "Tunnel Service",
                 NotificationManager.IMPORTANCE_LOW
             )
+            channel.setShowBadge(false)
             getSystemService(NotificationManager::class.java)
                 .createNotificationChannel(channel)
         }

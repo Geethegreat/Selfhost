@@ -1,4 +1,4 @@
-package com.example.selfhost
+package com.example.app
 
 import android.content.Intent
 import android.os.Bundle
@@ -23,6 +23,12 @@ import androidx.lifecycle.lifecycleScope
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
 import kotlinx.coroutines.launch
+import androidx.compose.foundation.Canvas
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 
 class SignInActivity : ComponentActivity() {
 
@@ -71,16 +77,86 @@ class SignInActivity : ComponentActivity() {
                 // Logo
                 Box(
                     Modifier
-                        .size(72.dp)
-                        .background(
-                            Brush.linearGradient(listOf(Color(0xFF00C2FF), Color(0xFF7B61FF))),
-                            RoundedCornerShape(20.dp)
-                        ),
+                        .size(180.dp)
+                        .background(Color(0xFF080810), RoundedCornerShape(22.dp)),
+                   //     .border(1.dp, Color(0xFF1E1E2E), RoundedCornerShape(22.dp)),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text("S", fontSize = 32.sp, fontWeight = FontWeight.Black, color = Color.White)
-                }
+                    Canvas(modifier = Modifier.size(130.dp)) {
 
+                        val cyan = Color(0xFF00C2FF)
+                        val purple = Color(0xFF7B61FF)
+
+                        val w = size.width
+                        val h = size.height
+
+                        fun sx(x: Float) = w * (x / 120f)
+                        fun sy(y: Float) = h * (y / 120f)
+
+                        // Phone body
+                        drawRoundRect(
+                            color = Color(0xFF0F0F20),
+                            topLeft = Offset(sx(42f), sy(30f)),
+                            size = Size(sx(36f), sy(60f)),
+                            cornerRadius = CornerRadius(6f)
+                        )
+
+                        // Phone outline
+                        drawRoundRect(
+                            color = cyan,
+                            topLeft = Offset(sx(42f), sy(30f)),
+                            size = Size(sx(36f), sy(60f)),
+                            cornerRadius = CornerRadius(6f),
+                            style = Stroke(width = 2.5f)
+                        )
+
+                        // Screen
+                        drawRoundRect(
+                            color = cyan.copy(alpha = 0.15f),
+                            topLeft = Offset(sx(48f), sy(36f)),
+                            size = Size(sx(24f), sy(38f)),
+                            cornerRadius = CornerRadius(2f)
+                        )
+
+                        // Bottom bar
+                        drawRoundRect(
+                            color = cyan.copy(alpha = 0.5f),
+                            topLeft = Offset(sx(51f), sy(83f)),
+                            size = Size(sx(18f), sy(3f)),
+                            cornerRadius = CornerRadius(1.5f)
+                        )
+
+                        // Wave 1
+                        drawPath(
+                            path = Path().apply {
+                                moveTo(sx(38f), sy(28f))
+                                quadraticBezierTo(sx(60f), sy(10f), sx(82f), sy(28f))
+                            },
+                            color = cyan.copy(alpha = 0.9f),
+                            style = Stroke(width = 3f, cap = StrokeCap.Round)
+                        )
+
+                        // Wave 2
+                        drawPath(
+                            path = Path().apply {
+                                moveTo(sx(44f), sy(22f))
+                                quadraticBezierTo(sx(60f), sy(8f), sx(76f), sy(22f))
+                            },
+                            color = purple.copy(alpha = 0.7f),
+                            style = Stroke(width = 3f, cap = StrokeCap.Round)
+                        )
+
+                        // Wave 3
+                        drawPath(
+                            path = Path().apply {
+                                moveTo(sx(50f), sy(17f))
+                                quadraticBezierTo(sx(60f), sy(7f), sx(70f), sy(17f))
+                            },
+                            color = cyan.copy(alpha = 0.5f),
+                            style = Stroke(width = 2.5f, cap = StrokeCap.Round)
+                        )
+                    }
+                }
                 Spacer(Modifier.height(24.dp))
 
                 Text(
@@ -104,7 +180,7 @@ class SignInActivity : ComponentActivity() {
                 Surface(
                     onClick = { if (!isLoading) signInWithGoogle() },
                     color = Color(0xFF13131F),
-                    shape = RoundedCornerShape(14.dp),
+                    shape = RoundedCornerShape(26.dp),
                     border = BorderStroke(1.dp, Color(0xFF2A2A3A)),
                     modifier = Modifier
                         .fillMaxWidth()

@@ -1,7 +1,6 @@
-package com.example.selfhost
+package com.example.app
 
 import fi.iki.elonen.NanoHTTPD
-import android.util.Log
 import java.io.File
 
 

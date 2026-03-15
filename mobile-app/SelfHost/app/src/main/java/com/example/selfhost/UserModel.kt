@@ -1,4 +1,4 @@
-package com.example.selfhost
+package com.example.app
 
 data class UserModel(
     val uid: String = "",

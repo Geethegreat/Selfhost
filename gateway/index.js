@@ -3,11 +3,13 @@ const { WebSocketServer } = require('ws');
 const http = require('http');
 const { randomUUID } = require('crypto');
 const rateLimit = require('express-rate-limit');
+const fs = require('fs');
+const path = require('path');
+
 const app = express();
+app.set('trust proxy', 1);
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, maxPayload: 50 * 1024 * 1024 });
-const fs = require('fs');  
-const path = require('path');
 
 const ANALYTICS_FILE = path.join(__dirname, 'analytics.json');
 
@@ -26,7 +28,6 @@ const connectedPhones = new Map();
 const viewerSessions = new Map();
 const analyticsStore = new Map();
 const pending = new Map();
-
 
 const REQUEST_TIMEOUT_MS = 30000;
 
@@ -62,18 +63,22 @@ wss.on('connection', (ws) => {
             return;
         }
 
-
         if (data.type === "REGISTER") {
             const slug = data.slug.toLowerCase();
             if (!/^[a-z0-9-]{3,30}$/.test(slug)) {
-                ws.send(JSON.stringify({ type: "ERROR", message: "Invalid slug" }))
-                ws.close()
-                return
-            }
-            if (connectedPhones.has(slug)) {
-                ws.send(JSON.stringify({ type: "ERROR", message: "Slug already taken" }));
-                ws.close(1008, "Slug already taken");
+                ws.send(JSON.stringify({ type: "ERROR", message: "Invalid slug" }));
+                ws.close();
                 return;
+            }
+            // If slug already registered, kick the old connection and accept the new one
+            // This handles reconnects after network changes without rejecting the new connection
+            if (connectedPhones.has(slug)) {
+                const oldWs = connectedPhones.get(slug);
+                if (oldWs !== ws) {
+                    console.log("Replacing stale connection for slug:", slug);
+                    oldWs.terminate();
+                    connectedPhones.delete(slug);
+                }
             }
             connectedPhones.set(slug, ws);
             ws.slug = slug;
@@ -108,29 +113,36 @@ wss.on('connection', (ws) => {
 
     ws.on('close', () => {
         if (ws.slug) {
-            connectedPhones.delete(ws.slug);
-            console.log("Phone disconnected:", ws.slug);
-            pending.forEach((entry, id) => {
-                if (entry.slug === ws.slug) {
-                    clearTimeout(entry.timeoutHandle);
-                    pending.delete(id);
-                    try { entry.res.status(503).send("Device disconnected"); } catch (_) {}
-                }
-            });
+            // Only delete if this is still the active connection for this slug
+            // (don't delete if it was already replaced by a new connection)
+            if (connectedPhones.get(ws.slug) === ws) {
+                connectedPhones.delete(ws.slug);
+                console.log("Phone disconnected:", ws.slug);
+                pending.forEach((entry, id) => {
+                    if (entry.slug === ws.slug) {
+                        clearTimeout(entry.timeoutHandle);
+                        pending.delete(id);
+                        try { entry.res.status(503).send("Device disconnected"); } catch (_) {}
+                    }
+                });
+            }
         }
     });
 
     ws.on('error', (err) => {
         console.error("WS error for slug", ws.slug, err.message);
-        if (ws.slug) connectedPhones.delete(ws.slug);
+        if (ws.slug && connectedPhones.get(ws.slug) === ws) {
+            connectedPhones.delete(ws.slug);
+        }
     });
 });
 
-// Single stats push interval
+// Stats push interval
 const statsInterval = setInterval(() => {
     connectedPhones.forEach((ws, slug) => pushStats(ws, slug));
 }, 5000);
 
+// Load saved analytics
 try {
     const saved = JSON.parse(fs.readFileSync(ANALYTICS_FILE, 'utf8'));
     Object.entries(saved).forEach(([key, value]) => analyticsStore.set(key, value));
@@ -139,13 +151,12 @@ try {
     console.log('No analytics file found, starting fresh');
 }
 
-// Save every 5 minutes
+// Save analytics every 5 minutes
 setInterval(() => {
-    fs.writeFileSync(ANALYTICS_FILE, 
-        JSON.stringify(Object.fromEntries(analyticsStore)))
-}, 5 * 60 * 1000)
+    fs.writeFileSync(ANALYTICS_FILE, JSON.stringify(Object.fromEntries(analyticsStore)));
+}, 5 * 60 * 1000);
 
-// Single heartbeat interval
+// Heartbeat interval
 const heartbeatInterval = setInterval(() => {
     connectedPhones.forEach((ws, slug) => {
         if (!ws.isAlive) {
@@ -196,13 +207,11 @@ app.use((req, res) => {
 
     if (parts.length === 0) return res.status(404).send("No slug provided");
 
-    // Declare slug first
     const slug = parts[0].toLowerCase();
     const phone = connectedPhones.get(slug);
 
     if (!phone) return res.status(404).send("Site not found or phone offline");
 
-    // Analytics — after slug is declared
     const ip = req.headers['x-forwarded-for']?.split(',')[0] || req.ip;
     const now = Date.now();
 
