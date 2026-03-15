@@ -75,6 +75,12 @@ wss.on('connection', (ws) => {
             if (connectedPhones.has(slug)) {
                 const oldWs = connectedPhones.get(slug);
                 if (oldWs !== ws) {
+                    // Only allow takeover if same UID (reconnect), reject if different UID (slug theft)
+                    if (oldWs.uid && oldWs.uid !== data.uid) {
+                        ws.send(JSON.stringify({ type: "ERROR", message: "Slug already taken" }));
+                        ws.close(1008, "Slug already taken");
+                        return;
+                    }
                     console.log("Replacing stale connection for slug:", slug);
                     oldWs.terminate();
                     connectedPhones.delete(slug);
@@ -82,6 +88,7 @@ wss.on('connection', (ws) => {
             }
             connectedPhones.set(slug, ws);
             ws.slug = slug;
+            ws.uid = data.uid; // store uid on the connection
             console.log("Phone registered:", slug);
             pushStats(ws, slug);
             return;
